@@ -9,7 +9,7 @@ declare(strict_types=1);
 require __DIR__ . '/includes/auth.php';
 
 authStart();
-$authUser = authRequireLogin();      // sem login, redireciona e encerra
+$authUser = authRequireInternal();
 $authCsrf = authCsrfToken();
 session_write_close();               // o index.php abre a sessão novamente
 

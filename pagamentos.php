@@ -33,32 +33,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     throw new RuntimeException('Confira a reserva, a forma de pagamento, o valor, as parcelas e o vencimento.');
                 }
 
-                $stmt = $db->prepare(bookingFinanceSql('b.id = ?'));
-                $stmt->execute([$bookingId]);
-                $booking = $stmt->fetch();
-                if (!$booking) {
-                    throw new RuntimeException('Reserva não encontrada.');
-                }
-                if ($booking['status'] === 'cancelled') {
-                    throw new RuntimeException('Não é possível lançar pagamentos em reserva cancelada.');
-                }
-
-                $amountCents = toCents($amount);
-                $openCents = toCents($booking['total']) - toCents($booking['paid']) - toCents($booking['scheduled']);
-                if ($amountCents > $openCents) {
-                    throw new RuntimeException('O valor excede o saldo ainda não lançado desta reserva (' . moneyCents(max(0, $openCents)) . ').');
-                }
-                if ($amountCents < $installments) {
-                    throw new RuntimeException('O valor é pequeno demais para essa quantidade de parcelas.');
-                }
-
-                $base = intdiv($amountCents, $installments);
-                $remainder = $amountCents - $base * $installments;
-                $insert = $db->prepare(
-                    'INSERT INTO payments (booking_id, amount, method, status, due_date, paid_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)'
-                );
                 $db->beginTransaction();
                 try {
+                    $lock = $db->prepare('SELECT status FROM bookings WHERE id = ? FOR UPDATE');
+                    $lock->execute([$bookingId]);
+                    $bookingStatus = $lock->fetchColumn();
+                    if ($bookingStatus === false) {
+                        throw new RuntimeException('Reserva não encontrada.');
+                    }
+                    if ($bookingStatus === 'cancelled') {
+                        throw new RuntimeException('Não é possível lançar pagamentos em reserva cancelada.');
+                    }
+
+                    $stmt = $db->prepare(bookingFinanceSql('b.id = ?'));
+                    $stmt->execute([$bookingId]);
+                    $booking = $stmt->fetch();
+                    if (!$booking) {
+                        throw new RuntimeException('Reserva não encontrada.');
+                    }
+                    $amountCents = toCents($amount);
+                    $openCents = toCents($booking['total']) - toCents($booking['paid']) - toCents($booking['scheduled']);
+                    if ($amountCents > $openCents) {
+                        throw new RuntimeException('O valor excede o saldo ainda não lançado desta reserva (' . moneyCents(max(0, $openCents)) . ').');
+                    }
+                    if ($amountCents < $installments) {
+                        throw new RuntimeException('O valor é pequeno demais para essa quantidade de parcelas.');
+                    }
+
+                    $base = intdiv($amountCents, $installments);
+                    $remainder = $amountCents - $base * $installments;
+                    $insert = $db->prepare(
+                        'INSERT INTO payments (booking_id, amount, method, status, due_date, paid_at, notes) VALUES (?, ?, ?, ?, ?, ?, ?)'
+                    );
                     for ($i = 0; $i < $installments; $i++) {
                         $cents = $base + ($i === $installments - 1 ? $remainder : 0);
                         $isPaid = $i === 0 && $firstPaid;
@@ -74,7 +80,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
                     $db->commit();
                 } catch (Throwable $e) {
-                    $db->rollBack();
+                    if ($db->inTransaction()) {
+                        $db->rollBack();
+                    }
                     throw $e;
                 }
                 flash('success', $installments > 1 ? "{$installments} parcelas lançadas com sucesso." : 'Pagamento lançado com sucesso.');

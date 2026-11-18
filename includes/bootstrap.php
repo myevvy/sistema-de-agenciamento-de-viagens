@@ -127,8 +127,9 @@ $db->exec(
 /* ---- Autenticação: toda página exige login, exceto as que definem PUBLIC_PAGE ---- */
 authDb($db);
 authEnsureSchema();
+require_once __DIR__ . '/bookings.php';
 if (!defined('PUBLIC_PAGE')) {
-    $currentUser = authRequireLogin();
+    $currentUser = defined('CLIENT_PAGE') ? authRequireClient() : authRequireInternal();
 }
 
 /* ---- Constantes de domínio ---- */
@@ -239,7 +240,8 @@ function bookingFinanceSql(string $where = '1=1', string $order = 'b.created_at 
             COALESCE(SUM(CASE WHEN py.status = 'pending' THEN py.amount END), 0) AS scheduled,
             COALESCE(SUM(CASE WHEN py.status = 'pending' AND py.due_date < {$today} THEN py.amount END), 0) AS overdue,
             MIN(CASE WHEN py.status = 'pending' AND py.due_date < {$today} THEN py.due_date END) AS oldest_overdue,
-            COALESCE(SUM(CASE WHEN py.status = 'refunded' THEN py.amount END), 0) AS refunded
+            COALESCE(SUM(CASE WHEN py.status = 'refunded' THEN py.amount END), 0) AS refunded,
+            COUNT(py.id) AS payment_count
         FROM bookings b
         JOIN clients c ON c.id = b.client_id
         JOIN packages p ON p.id = b.package_id

@@ -8,7 +8,8 @@ declare(strict_types=1);
 
 date_default_timezone_set('America/Sao_Paulo');
 
-const AUTH_ROLES = ['admin' => 'Administrador', 'staff' => 'Funcionário'];
+const AUTH_ROLES = ['admin' => 'Administrador', 'staff' => 'Funcionário', 'client' => 'Cliente'];
+const AUTH_INTERNAL_ROLES = ['admin' => 'Administrador', 'staff' => 'Funcionário'];
 const AUTH_MAX_FAILS = 5;
 const AUTH_LOCK_MINUTES = 10;
 
@@ -65,13 +66,22 @@ function authEnsureSchema(): void
     if ($done) {
         return;
     }
-    authDb()->exec(
+    $db = authDb();
+    $clientsExist = (int) $db->query(
+        "SELECT COUNT(*) FROM information_schema.tables
+         WHERE table_schema = DATABASE() AND table_name = 'clients'"
+    )->fetchColumn() > 0;
+    $clientForeignKey = $clientsExist
+        ? ', CONSTRAINT fk_users_client FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE RESTRICT'
+        : '';
+    $db->exec(
         "CREATE TABLE IF NOT EXISTS users (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             name VARCHAR(120) NOT NULL,
             email VARCHAR(190) NOT NULL,
             password_hash VARCHAR(255) NOT NULL,
             role VARCHAR(16) NOT NULL DEFAULT 'staff',
+            client_id BIGINT UNSIGNED NULL,
             active TINYINT(1) NOT NULL DEFAULT 0,
             failed_attempts INT UNSIGNED NOT NULL DEFAULT 0,
             locked_until DATETIME NULL,
@@ -79,9 +89,67 @@ function authEnsureSchema(): void
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
             UNIQUE KEY uq_users_email (email),
-            CHECK (role IN ('admin', 'staff'))
+            UNIQUE KEY uq_users_client_id (client_id),
+            CONSTRAINT chk_users_role CHECK (role IN ('admin', 'staff', 'client'))
+            {$clientForeignKey}
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
     );
+
+    $columns = $db->query('SHOW COLUMNS FROM users')->fetchAll();
+    if (!in_array('client_id', array_column($columns, 'Field'), true)) {
+        $db->exec('ALTER TABLE users ADD COLUMN client_id BIGINT UNSIGNED NULL');
+    }
+
+    $index = $db->prepare(
+        "SELECT COUNT(*) FROM information_schema.statistics
+         WHERE table_schema = DATABASE() AND table_name = 'users' AND index_name = 'uq_users_client_id'"
+    );
+    $index->execute();
+    if ((int) $index->fetchColumn() === 0) {
+        $db->exec('ALTER TABLE users ADD UNIQUE KEY uq_users_client_id (client_id)');
+    }
+
+    $roleChecks = $db->query(
+        "SELECT tc.constraint_name AS constraint_name, cc.check_clause AS check_clause
+         FROM information_schema.table_constraints tc
+         JOIN information_schema.check_constraints cc
+           ON cc.constraint_schema = tc.constraint_schema
+          AND cc.constraint_name = tc.constraint_name
+         WHERE tc.constraint_schema = DATABASE()
+           AND tc.table_name = 'users'
+           AND tc.constraint_type = 'CHECK'"
+    )->fetchAll();
+    $hasClientRoleCheck = false;
+    foreach ($roleChecks as $check) {
+        $clause = strtolower((string) $check['check_clause']);
+        if (!str_contains($clause, 'role')) {
+            continue;
+        }
+        if (str_contains($clause, "'client'")) {
+            $hasClientRoleCheck = true;
+            continue;
+        }
+        $constraint = str_replace('`', '``', (string) $check['constraint_name']);
+        $db->exec("ALTER TABLE users DROP CHECK `{$constraint}`");
+    }
+    if (!$hasClientRoleCheck) {
+        $db->exec("ALTER TABLE users ADD CONSTRAINT chk_users_role CHECK (role IN ('admin', 'staff', 'client'))");
+    }
+
+    if ($clientsExist) {
+        $foreignKey = $db->prepare(
+            "SELECT COUNT(*) FROM information_schema.key_column_usage
+             WHERE table_schema = DATABASE() AND table_name = 'users' AND column_name = 'client_id'
+               AND referenced_table_name = 'clients' AND referenced_column_name = 'id'"
+        );
+        $foreignKey->execute();
+        if ((int) $foreignKey->fetchColumn() === 0) {
+            $db->exec(
+                'ALTER TABLE users ADD CONSTRAINT fk_users_client
+                 FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE RESTRICT'
+            );
+        }
+    }
     $done = true;
 }
 
@@ -109,7 +177,7 @@ function authCurrentUser(): ?array
     if ($id < 1) {
         return null;
     }
-    $stmt = authDb()->prepare('SELECT id, name, email, role, active FROM users WHERE id = ?');
+    $stmt = authDb()->prepare('SELECT id, name, email, role, client_id, active FROM users WHERE id = ?');
     $stmt->execute([$id]);
     $user = $stmt->fetch();
     if (!$user || (int) $user['active'] !== 1) {
@@ -126,8 +194,37 @@ function authRequireLogin(): array
     if ($user) {
         return $user;
     }
-    header('Location: ' . (authUserCount() === 0 ? 'cadastro.php' : 'login.php'));
+    header('Location: ' . (authUserCount() === 0 ? 'setup.php' : 'login.php'));
     exit;
+}
+
+function authHomeUrl(?array $user): string
+{
+    return $user !== null && $user['role'] === 'client' ? 'cliente.php' : 'painel.php';
+}
+
+function authRequireInternal(): array
+{
+    $user = authRequireLogin();
+    if (!isset(AUTH_INTERNAL_ROLES[$user['role']])) {
+        header('Location: cliente.php');
+        exit;
+    }
+    return $user;
+}
+
+function authRequireClient(): array
+{
+    $user = authRequireLogin();
+    if ($user['role'] !== 'client') {
+        header('Location: ' . authHomeUrl($user));
+        exit;
+    }
+    if ((int) ($user['client_id'] ?? 0) < 1) {
+        http_response_code(403);
+        exit('Esta conta de cliente não está vinculada a um cadastro válido.');
+    }
+    return $user;
 }
 
 function authIsAdmin(?array $user): bool
@@ -186,7 +283,10 @@ function authLogin(string $email, string $password): array
         return ['ok' => false, 'message' => $generic];
     }
     if ((int) $user['active'] !== 1) {
-        return ['ok' => false, 'message' => 'Sua conta ainda está aguardando aprovação de um administrador.'];
+        $message = $user['role'] === 'client'
+            ? 'Sua conta foi desativada. Entre em contato com a agência.'
+            : 'Sua conta ainda está aguardando aprovação de um administrador.';
+        return ['ok' => false, 'message' => $message];
     }
 
     $db->prepare('UPDATE users SET failed_attempts = 0, locked_until = NULL, last_login_at = ? WHERE id = ?')
@@ -203,19 +303,64 @@ function authLogout(): void
     session_regenerate_id(true);
 }
 
-/**
- * Cria uma conta. A primeira conta do sistema vira administradora e já fica ativa;
- * as demais ficam como funcionário aguardando aprovação.
- * @return array{id: int, first: bool}
- */
-function authRegister(string $name, string $email, string $password): array
+function authRegisterInitialAdmin(string $name, string $email, string $password): int
+{
+    $db = authDb();
+    $database = (string) $db->query('SELECT DATABASE()')->fetchColumn();
+    $lockName = 'agency_initial_admin_' . substr(hash('sha256', $database), 0, 24);
+    $lock = $db->prepare('SELECT GET_LOCK(?, 10)');
+    $lock->execute([$lockName]);
+    if ((int) $lock->fetchColumn() !== 1) {
+        throw new RuntimeException('Não foi possível iniciar a configuração. Tente novamente.');
+    }
+
+    try {
+        $db->beginTransaction();
+        if ((int) $db->query('SELECT COUNT(*) FROM users')->fetchColumn() !== 0) {
+            throw new RuntimeException('A configuração inicial já foi concluída.');
+        }
+        $db->prepare('INSERT INTO users (name, email, password_hash, role, active) VALUES (?, ?, ?, ?, 1)')
+            ->execute([$name, strtolower($email), password_hash($password, PASSWORD_DEFAULT), 'admin']);
+        $id = (int) $db->lastInsertId();
+        $db->commit();
+    } catch (Throwable $e) {
+        if ($db->inTransaction()) {
+            $db->rollBack();
+        }
+        throw $e;
+    } finally {
+        $db->prepare('SELECT RELEASE_LOCK(?)')->execute([$lockName]);
+    }
+    return $id;
+}
+
+function authRegisterClient(string $name, string $email, string $phone, string $password): int
 {
     $db = authDb();
     $db->beginTransaction();
     try {
-        $first = (int) $db->query('SELECT COUNT(*) FROM users FOR UPDATE')->fetchColumn() === 0;
-        $db->prepare('INSERT INTO users (name, email, password_hash, role, active) VALUES (?, ?, ?, ?, ?)')
-            ->execute([$name, strtolower($email), password_hash($password, PASSWORD_DEFAULT), $first ? 'admin' : 'staff', $first ? 1 : 0]);
+        if ((int) $db->query('SELECT COUNT(*) FROM users')->fetchColumn() === 0) {
+            throw new RuntimeException('A configuração inicial da agência ainda não foi concluída.');
+        }
+        $existingUser = $db->prepare('SELECT id FROM users WHERE email = ? FOR UPDATE');
+        $existingUser->execute([strtolower($email)]);
+        if ($existingUser->fetchColumn()) {
+            throw new RuntimeException('Este e-mail já possui uma conta. Faça login para continuar.');
+        }
+
+        $existingClient = $db->prepare('SELECT id FROM clients WHERE email = ? FOR UPDATE');
+        $existingClient->execute([strtolower($email)]);
+        if ($existingClient->fetchColumn()) {
+            throw new RuntimeException('Este e-mail já consta no cadastro da agência. Entre em contato para vincular sua conta.');
+        }
+
+        $db->prepare('INSERT INTO clients (name, email, phone) VALUES (?, ?, ?)')
+            ->execute([$name, strtolower($email), $phone]);
+        $clientId = (int) $db->lastInsertId();
+        $db->prepare(
+            "INSERT INTO users (name, email, password_hash, role, client_id, active)
+             VALUES (?, ?, ?, 'client', ?, 1)"
+        )->execute([$name, strtolower($email), password_hash($password, PASSWORD_DEFAULT), $clientId]);
         $id = (int) $db->lastInsertId();
         $db->commit();
     } catch (Throwable $e) {
@@ -224,7 +369,7 @@ function authRegister(string $name, string $email, string $password): array
         }
         throw $e;
     }
-    return ['id' => $id, 'first' => $first];
+    return $id;
 }
 
 function authInitial(string $name): string

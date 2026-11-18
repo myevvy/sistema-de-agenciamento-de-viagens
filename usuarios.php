@@ -54,7 +54,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if ($problem !== null) {
                     throw new RuntimeException($problem);
                 }
-                if (!isset(AUTH_ROLES[$role])) {
+                if (!isset(AUTH_INTERNAL_ROLES[$role])) {
                     throw new RuntimeException('Perfil inválido.');
                 }
                 $db->prepare('INSERT INTO users (name, email, password_hash, role, active) VALUES (?, ?, ?, ?, 1)')
@@ -82,7 +82,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             case 'set_role':
                 $role = postString('role');
-                if (!isset(AUTH_ROLES[$role])) {
+                if (!isset(AUTH_INTERNAL_ROLES[$role])) {
                     throw new RuntimeException('Perfil inválido.');
                 }
                 $stmt = $db->prepare('SELECT role, active FROM users WHERE id = ?');
@@ -90,6 +90,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $target = $stmt->fetch();
                 if (!$target) {
                     throw new RuntimeException('Usuário não encontrado.');
+                }
+                if ($target['role'] === 'client') {
+                    throw new RuntimeException('Contas de clientes não podem ser convertidas pelo painel.');
                 }
                 if ($targetId === (int) $me['id']) {
                     throw new RuntimeException('Você não pode alterar o seu próprio perfil.');
@@ -118,6 +121,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$target) {
                     throw new RuntimeException('Usuário não encontrado.');
                 }
+                if ($target['role'] === 'client') {
+                    throw new RuntimeException('Contas de clientes devem ser desativadas, não removidas.');
+                }
                 if ($targetId === (int) $me['id']) {
                     throw new RuntimeException('Você não pode remover a sua própria conta.');
                 }
@@ -142,7 +148,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 }
 
 $users = $isAdmin ? $db->query('SELECT * FROM users ORDER BY active ASC, name')->fetchAll() : [];
-$pending = count(array_filter($users, static fn(array $u): bool => (int) $u['active'] === 0));
+$pending = count(array_filter(
+    $users,
+    static fn(array $u): bool => $u['role'] !== 'client' && (int) $u['active'] === 0
+));
 
 renderHeader('usuarios', $isAdmin ? 'Usuários' : 'Minha conta', $isAdmin ? 'Usuários' : 'Minha conta');
 ?>
@@ -155,7 +164,7 @@ renderHeader('usuarios', $isAdmin ? 'Usuários' : 'Minha conta', $isAdmin ? 'Usu
         <form method="post"><?= csrfField() ?><input type="hidden" name="action" value="create_user">
             <label>Nome completo<input name="name" required maxlength="120" placeholder="Ex.: Carlos Souza"></label>
             <label>E-mail<input name="email" type="email" required maxlength="190" placeholder="carlos@agencia.com"></label>
-            <label>Perfil<select name="role"><?php foreach (AUTH_ROLES as $key => $label): ?><option value="<?= h($key) ?>" <?= $key === 'staff' ? 'selected' : '' ?>><?= h($label) ?></option><?php endforeach; ?></select></label>
+            <label>Perfil<select name="role"><?php foreach (AUTH_INTERNAL_ROLES as $key => $label): ?><option value="<?= h($key) ?>" <?= $key === 'staff' ? 'selected' : '' ?>><?= h($label) ?></option><?php endforeach; ?></select></label>
             <div class="field-row"><label>Senha<input name="password" type="password" required minlength="8" maxlength="72" autocomplete="new-password"></label>
                 <label>Confirmar<input name="password_confirm" type="password" required minlength="8" maxlength="72" autocomplete="new-password"></label></div>
             <div class="form-actions"><button class="button primary" type="submit">Criar usuário</button></div>
@@ -167,20 +176,20 @@ renderHeader('usuarios', $isAdmin ? 'Usuários' : 'Minha conta', $isAdmin ? 'Usu
             <?php foreach ($users as $u): $isSelf = (int) $u['id'] === (int) $me['id']; $active = (int) $u['active'] === 1; ?>
             <tr>
                 <td><strong><?= h($u['name']) ?><?= $isSelf ? ' (você)' : '' ?></strong><small class="cell-sub"><?= h($u['email']) ?></small></td>
-                <td><?php if ($isSelf): ?><?= badge('running', AUTH_ROLES[$u['role']] ?? $u['role']) ?><?php else: ?>
+                <td><?php if ($isSelf || $u['role'] === 'client'): ?><?= badge($u['role'] === 'client' ? 'sale' : 'running', AUTH_ROLES[$u['role']] ?? $u['role']) ?><?php else: ?>
                     <form method="post" class="inline-form"><?= csrfField() ?><input type="hidden" name="action" value="set_role"><input type="hidden" name="id" value="<?= (int) $u['id'] ?>">
-                        <select name="role" class="role-select" aria-label="Perfil" onchange="this.form.submit()"><?php foreach (AUTH_ROLES as $key => $label): ?><option value="<?= h($key) ?>" <?= $u['role'] === $key ? 'selected' : '' ?>><?= h($label) ?></option><?php endforeach; ?></select></form><?php endif; ?></td>
-                <td><?= $active ? badge('paid', 'Ativo') : badge('partial', 'Aguardando / inativo') ?></td>
+                        <select name="role" class="role-select" aria-label="Perfil" onchange="this.form.submit()"><?php foreach (AUTH_INTERNAL_ROLES as $key => $label): ?><option value="<?= h($key) ?>" <?= $u['role'] === $key ? 'selected' : '' ?>><?= h($label) ?></option><?php endforeach; ?></select></form><?php endif; ?></td>
+                <td><?= $active ? badge('paid', 'Ativo') : badge('partial', $u['role'] === 'client' ? 'Inativo' : 'Aguardando aprovação') ?></td>
                 <td><?= $u['last_login_at'] ? h(date('d/m/Y H:i', strtotime($u['last_login_at']))) : '—' ?></td>
                 <td><div class="actions-wrap">
                     <?php if (!$active): ?>
-                        <form method="post" class="inline-form"><?= csrfField() ?><input type="hidden" name="action" value="set_active"><input type="hidden" name="id" value="<?= (int) $u['id'] ?>"><input type="hidden" name="active" value="1"><button class="button success small" type="submit">Aprovar</button></form>
+                        <form method="post" class="inline-form"><?= csrfField() ?><input type="hidden" name="action" value="set_active"><input type="hidden" name="id" value="<?= (int) $u['id'] ?>"><input type="hidden" name="active" value="1"><button class="button success small" type="submit"><?= $u['role'] === 'client' ? 'Ativar' : 'Aprovar' ?></button></form>
                     <?php elseif (!$isSelf): ?>
                         <form method="post" class="inline-form" onsubmit="return confirm('Desativar este usuário?')"><?= csrfField() ?><input type="hidden" name="action" value="set_active"><input type="hidden" name="id" value="<?= (int) $u['id'] ?>"><input type="hidden" name="active" value="0"><button class="button secondary small" type="submit">Desativar</button></form>
                     <?php endif; ?>
                     <details class="reset"><summary>Redefinir senha</summary>
                         <form method="post"><?= csrfField() ?><input type="hidden" name="action" value="reset_password"><input type="hidden" name="id" value="<?= (int) $u['id'] ?>"><input name="password" type="password" required minlength="8" maxlength="72" placeholder="Nova senha" autocomplete="new-password"><button class="button primary small" type="submit">Salvar</button></form></details>
-                    <?php if (!$isSelf): ?>
+                    <?php if (!$isSelf && $u['role'] !== 'client'): ?>
                         <form method="post" class="inline-form" onsubmit="return confirm('Remover este usuário?')"><?= csrfField() ?><input type="hidden" name="action" value="delete_user"><input type="hidden" name="id" value="<?= (int) $u['id'] ?>"><button class="icon-button danger" aria-label="Remover usuário">×</button></form>
                     <?php endif; ?>
                 </div></td>

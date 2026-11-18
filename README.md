@@ -16,6 +16,16 @@ php -r 'echo PHP_BINARY, PHP_EOL; print_r(PDO::getAvailableDrivers());'
 
 O resultado precisa incluir `mysql`. Instale o driver correspondente à versão do PHP em uso (por exemplo, `sudo apt install php-mysql` em instalações PHP gerenciadas pelo Ubuntu). Em containers Ubuntu com PHP 8.3, pode ser necessário instalar `php8.3-cli php8.3-mysql` e usar `php8.3` nos comandos abaixo. O driver instalado para uma versão do PHP não habilita automaticamente outra versão.
 
+Em alguns Codespaces, `php` pode apontar para uma instalação personalizada do PHP 8.4 sem `pdo_mysql`, enquanto o PHP 8.3 do sistema já tem o driver. Compare os executáveis e use aquele cuja lista contenha `mysql`:
+
+```bash
+command -v php
+php -r 'echo PHP_BINARY, PHP_EOL; print_r(PDO::getAvailableDrivers());'
+/usr/bin/php8.3 -r 'echo PHP_BINARY, PHP_EOL; print_r(PDO::getAvailableDrivers());'
+```
+
+Se o segundo comando listar `mysql`, inicie o site explicitamente com `/usr/bin/php8.3`, como mostrado abaixo. Não é necessário alterar `config.php` por causa de `could not find driver`.
+
 ## Configuração do MySQL
 
 1. No phpMyAdmin, crie o banco `agencia_viagens` com collation `utf8mb4_unicode_ci`. Também é possível executar no separador SQL:
@@ -37,20 +47,26 @@ O resultado precisa incluir `mysql`. Instale o driver correspondente à versão 
 3. Inicie o sistema:
 
    ```bash
-   php -S localhost:8000
+   php -S localhost:8000 router.php
    ```
 
    Abra <http://localhost:8000>. As tabelas são criadas automaticamente na primeira execução. Se a conexão falhar, confira se o MySQL está ativo, se `pdo_mysql` está habilitado e se host, porta, banco e credenciais em `config.php` estão corretos.
 
-Esta versão não possui autenticação; use em ambiente local/interno e implemente login e controle de acesso antes de publicar na internet.
+   Se apenas `/usr/bin/php8.3` listar o driver `mysql`, use `/usr/bin/php8.3 -S localhost:8000 router.php` no lugar do comando acima.
+
+O servidor embutido deve ser iniciado com `router.php` para aplicar o login e o controle de acesso. Na primeira abertura, configure o administrador em `/setup.php` antes de publicar o site; essa configuração só fica disponível enquanto ainda não há usuários. Clientes podem criar a própria conta em `/cadastro.php`. Administradores cadastram e aprovam funcionários em **Usuários**. Todos entram pelo mesmo `/login.php`, que encaminha cada perfil à área correspondente.
 
 ## Funcionalidades
 
 - Painel com totais de clientes, pacotes e reservas.
 - Cadastro, edição e remoção de clientes e pacotes.
 - Cadastro de reservas associando clientes e pacotes, com controle de vagas disponíveis.
+- Área do cliente com cadastro público, consulta a pacotes com vagas, reserva e visualização das próprias viagens.
+- Clientes podem cancelar reservas futuras sem pagamentos lançados; para reservas com pagamentos, é necessário entrar em contato com a agência.
 - Atualização do estado da reserva: pendente, confirmada ou cancelada.
 - Proteção CSRF nos formulários, validação no servidor e consultas preparadas.
+
+As reservas feitas pelo cliente são confirmadas imediatamente, mas o pagamento online, escolha de assento e notificações não fazem parte desta etapa. Clientes existentes no cadastro da agência devem entrar em contato para vincular a conta, em vez de tentar cadastrar o mesmo e-mail novamente.
 
 Pacotes e clientes vinculados a reservas não podem ser removidos; remova primeiro as reservas relacionadas.
 
@@ -70,7 +86,7 @@ sudo service mysql status
 Se o comando `php` não listar o driver `mysql`, use a versão que tem `pdo_mysql` habilitado para iniciar o servidor. Por exemplo:
 
 ```bash
-php8.3 -S localhost:8000
+/usr/bin/php8.3 -S localhost:8000 router.php
 ```
 
 ### A porta 8000 já está em uso
@@ -78,14 +94,24 @@ php8.3 -S localhost:8000
 Já existe outro servidor nessa porta. Pare-o com `Ctrl+C` no terminal em que está rodando e inicie o PHP novamente, ou escolha outra porta:
 
 ```bash
-php8.3 -S localhost:8001
+/usr/bin/php8.3 -S localhost:8001 router.php
 ```
 
 Nesse caso, abra <http://localhost:8001>.
 
 ### `could not find driver` ou a lista PDO não inclui `mysql`
 
-O `pdo_mysql` não está habilitado na versão do PHP que está executando a aplicação. Instale/habilite o driver para essa versão e confira novamente com `PDO::getAvailableDrivers()`. Reinicie o servidor PHP depois de instalar o driver.
+O `pdo_mysql` não está habilitado no executável PHP que está rodando a aplicação. Confira `PHP_BINARY` e `PDO::getAvailableDrivers()` usando os comandos acima. Em Codespaces, se `/usr/bin/php8.3` listar `mysql`, inicie o site com:
+
+```bash
+/usr/bin/php8.3 -S localhost:8000 router.php
+```
+
+Caso contrário, instale/habilite o driver para a mesma versão e distribuição do PHP em uso, confira novamente a lista de drivers e reinicie o servidor PHP.
+
+### Aviso do Xdebug sobre `localhost:9003`
+
+`Xdebug: Could not connect to debugging client` é um aviso separado: o Xdebug não encontrou um depurador escutando na porta 9003. Ele não causa a falha de conexão com MySQL e pode ser ignorado ao executar o site normalmente.
 
 ### `SQLSTATE[HY000] [1045] Access denied`
 

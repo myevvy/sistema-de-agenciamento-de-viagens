@@ -1,7 +1,9 @@
 <?php
 declare(strict_types=1);
 
-session_start();
+require_once __DIR__ . '/includes/auth.php';
+authStart();
+authRequireInternal();
 
 $configPath = __DIR__ . '/config.php';
 if (!is_file($configPath)) {
@@ -72,6 +74,8 @@ $db->exec(
         CONSTRAINT fk_bookings_package FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE RESTRICT
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
 );
+
+require_once __DIR__ . '/includes/bookings.php';
 
 function h(string|int|float|null $value): string
 {
@@ -190,22 +194,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$clientId || !$packageId || !$travelers || $travelers < 1) {
                     throw new RuntimeException('Selecione um cliente, um pacote e a quantidade de viajantes.');
                 }
-                $stmt = $db->prepare('SELECT seat_capacity FROM packages WHERE id = ?');
-                $stmt->execute([$packageId]);
-                $package = $stmt->fetch();
-                if (!$package) {
-                    throw new RuntimeException('O pacote selecionado não foi encontrado.');
-                }
-                $stmt = $db->prepare(
-                    "SELECT COALESCE(SUM(travelers), 0) FROM bookings WHERE package_id = ? AND status <> 'cancelled'"
-                );
-                $stmt->execute([$packageId]);
-                $reservedSeats = (int) $stmt->fetchColumn();
-                if ($reservedSeats + $travelers > (int) $package['seat_capacity']) {
-                    throw new RuntimeException('Não há vagas disponíveis suficientes para essa reserva.');
-                }
-                $stmt = $db->prepare('INSERT INTO bookings (client_id, package_id, travelers) VALUES (?, ?, ?)');
-                $stmt->execute([$clientId, $packageId, $travelers]);
+                createBookingWithCapacity($db, $clientId, $packageId, $travelers);
                 $_SESSION['flash'] = ['type' => 'success', 'text' => 'Reserva criada como pendente.'];
                 break;
 

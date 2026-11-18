@@ -50,6 +50,38 @@ function renderHeader(string $active, string $title, string $crumb): void
 <?php
 }
 
+function renderClientHeader(string $title): void
+{
+    $user = authCurrentUser();
+    ?>
+<!doctype html>
+<html lang="pt-BR">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title><?= h($title) ?> | VivaMundo</title>
+    <link rel="stylesheet" href="assets/style.css">
+    <link rel="stylesheet" href="assets/extra.css">
+</head>
+<body>
+<aside class="sidebar client-sidebar">
+    <a class="brand" href="cliente.php"><span class="brand-mark">V</span><span>Viva<span class="brand-light">Mundo</span><small>ÁREA DO VIAJANTE</small></span></a>
+    <p class="nav-label">SUA VIAGEM</p>
+    <nav>
+        <a href="#pacotes"><span>✈</span> Explorar pacotes</a>
+        <a href="#reservas"><span>▤</span> Minhas reservas</a>
+    </nav>
+    <div class="sidebar-footer">ÁREA DO CLIENTE</div>
+</aside>
+<main class="main">
+    <header class="topbar"><div class="breadcrumb">VivaMundo <span>/</span> <?= h($title) ?></div><?= $user ? authUserChip($user, authCsrfToken()) : '' ?></header>
+    <div class="content">
+        <?php if ($flash = $_SESSION['flash'] ?? null): unset($_SESSION['flash']); ?>
+            <div class="flash <?= h($flash['type']) ?>" role="status"><?= h($flash['text']) ?></div>
+        <?php endif; ?>
+<?php
+}
+
 function renderFooter(): void
 {
     ?>
